@@ -125,6 +125,8 @@ fn admitted_artifact(digest: &str, org: &str, name: &str) -> (ArtifactState, Led
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: "publisher:alice@pleme.io".into(),
         signed_at: now,
+            cert_chain: None,
+            rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -187,6 +189,8 @@ fn revocation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
+            cert_chain: None,
+            rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -241,6 +245,8 @@ fn quarantine_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
+            cert_chain: None,
+            rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -277,6 +283,8 @@ fn reactivation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: "scanner:openclaw-scanner".into(),
         signed_at: now,
+            cert_chain: None,
+            rekor_bundle: None,
     };
     let new_state_root = compose_state_leaf_root(
         state.kind.name(),
@@ -302,6 +310,8 @@ fn reactivation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
+            cert_chain: None,
+            rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -410,9 +420,15 @@ async fn build_cartorio(seed: impl FnOnce(&cartorio::store::Store) -> Vec<(Artif
         org: ORG.into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
+        verifier: Default::default(),
+        auth_bearer_token: None,
     };
     let app = CartorioAppState::new(cfg);
-    let pairs = seed(&app.store);
+    // Cartorio v0.5+: app.store is `Arc<dyn Backend + Send + Sync>`.
+    // The seed closure's `&Store` parameter is for callers that want
+    // to inspect; existing tests bind `_store` so a stand-in works.
+    let store = cartorio::store::Store::new();
+    let pairs = seed(&store);
     for (s, e) in pairs {
         app.store.admit(s, e).await;
     }
