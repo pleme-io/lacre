@@ -125,8 +125,8 @@ fn admitted_artifact(digest: &str, org: &str, name: &str) -> (ArtifactState, Led
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: "publisher:alice@pleme.io".into(),
         signed_at: now,
-            cert_chain: None,
-            rekor_bundle: None,
+        cert_chain: None,
+        rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -182,15 +182,16 @@ fn revocation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         &modifier,
         now.timestamp(),
     );
-    let event_root = compose_revocation_event_root(&state.id, "test-revoke", &modifier, now.timestamp());
+    let event_root =
+        compose_revocation_event_root(&state.id, "test-revoke", &modifier, now.timestamp());
     let signed = SignedRoot {
         root: new_state_root.clone(),
         signature: "b".repeat(64),
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
-            cert_chain: None,
-            rekor_bundle: None,
+        cert_chain: None,
+        rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -233,20 +234,16 @@ fn quarantine_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         &modifier,
         now.timestamp(),
     );
-    let event_root = compose_quarantine_event_root(
-        &state.id,
-        "test-quarantine",
-        &modifier,
-        now.timestamp(),
-    );
+    let event_root =
+        compose_quarantine_event_root(&state.id, "test-quarantine", &modifier, now.timestamp());
     let signed = SignedRoot {
         root: new_state_root.clone(),
         signature: "c".repeat(64),
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
-            cert_chain: None,
-            rekor_bundle: None,
+        cert_chain: None,
+        rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -283,8 +280,8 @@ fn reactivation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: "scanner:openclaw-scanner".into(),
         signed_at: now,
-            cert_chain: None,
-            rekor_bundle: None,
+        cert_chain: None,
+        rekor_bundle: None,
     };
     let new_state_root = compose_state_leaf_root(
         state.kind.name(),
@@ -310,8 +307,8 @@ fn reactivation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
         algorithm: SigningAlgorithm::Blake3KeyedHmac,
         signer_id: modifier.signer_label(),
         signed_at: now,
-            cert_chain: None,
-            rekor_bundle: None,
+        cert_chain: None,
+        rekor_bundle: None,
     };
     (
         ArtifactState {
@@ -415,12 +412,14 @@ async fn spawn_lacre(cartorio_url: String, backend_url: String, org: &str) -> St
     url
 }
 
-async fn build_cartorio(seed: impl FnOnce(&cartorio::store::Store) -> Vec<(ArtifactState, LedgerEvent)>) -> Arc<CartorioAppState> {
+async fn build_cartorio(
+    seed: impl FnOnce(&cartorio::store::Store) -> Vec<(ArtifactState, LedgerEvent)>,
+) -> Arc<CartorioAppState> {
     let cfg = RegistryConfig {
         org: ORG.into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
-        verifier: Default::default(),
+        verifier: cartorio::config::VerifierPolicy::default(),
         auth_bearer_token: None,
     };
     let app = CartorioAppState::new(cfg);
@@ -451,10 +450,8 @@ const TEST_MANIFEST: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd
 async fn end_to_end_compliant_image_flows_through() {
     let digest = manifest_digest(TEST_MANIFEST);
 
-    let cartorio_state = build_cartorio(|_store| {
-        vec![admitted_artifact(&digest, ORG, "myimage")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&digest, ORG, "myimage")]).await;
 
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state).await;
@@ -462,7 +459,9 @@ async fn end_to_end_compliant_image_flows_through() {
 
     // sanity: cartorio is up + reports the artifact at this digest
     let resp = http_client()
-        .get(format!("{cartorio_url}/api/v1/artifacts/by-digest/{digest}"))
+        .get(format!(
+            "{cartorio_url}/api/v1/artifacts/by-digest/{digest}"
+        ))
         .send()
         .await
         .unwrap();
@@ -518,10 +517,8 @@ async fn end_to_end_unknown_digest_blocked_without_touching_backend() {
 async fn end_to_end_revoked_digest_blocked() {
     let digest = manifest_digest(TEST_MANIFEST);
 
-    let cartorio_state = build_cartorio(|_store| {
-        vec![admitted_artifact(&digest, ORG, "myimage-rev")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&digest, ORG, "myimage-rev")]).await;
 
     // After admission, revoke the artifact.
     let live = cartorio_state
@@ -557,10 +554,9 @@ async fn end_to_end_wrong_org_blocked() {
     let digest = manifest_digest(TEST_MANIFEST);
 
     // Artifact is admitted under "other-org", but lacre gates "pleme-io".
-    let cartorio_state = build_cartorio(|_store| {
-        vec![admitted_artifact(&digest, "other-org", "myimage-other")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&digest, "other-org", "myimage-other")])
+            .await;
 
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state).await;
@@ -646,10 +642,8 @@ async fn end_to_end_backend_unreachable_returns_502_after_compliance_passes() {
     // Lacre must return 502 Bad Gateway, surfacing the dependency
     // failure to the operator without silently dropping the push.
     let digest = manifest_digest(TEST_MANIFEST);
-    let cartorio_state = build_cartorio(|_| {
-        vec![admitted_artifact(&digest, ORG, "myimage-bedown")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_| vec![admitted_artifact(&digest, ORG, "myimage-bedown")]).await;
     let cartorio_url = spawn_cartorio(cartorio_state).await;
     let dead_backend = "http://127.0.0.1:1".to_string();
     let lacre_url = spawn_lacre(cartorio_url, dead_backend, ORG).await;
@@ -739,10 +733,8 @@ async fn end_to_end_body_digest_not_url_reference_is_what_gates() {
     let evil_body = b"some-malicious-bytes-with-different-hash-entirely";
     assert_ne!(manifest_digest(evil_body), known_digest);
 
-    let cartorio_state = build_cartorio(|_| {
-        vec![admitted_artifact(&known_digest, ORG, "good-image")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_| vec![admitted_artifact(&known_digest, ORG, "good-image")]).await;
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state).await;
     let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
@@ -752,7 +744,9 @@ async fn end_to_end_body_digest_not_url_reference_is_what_gates() {
     // It must hash the body, see a different digest, fail to find it
     // in cartorio, and 403.
     let resp = http_client()
-        .put(format!("{lacre_url}/v2/myorg/myimage/manifests/{known_digest}"))
+        .put(format!(
+            "{lacre_url}/v2/myorg/myimage/manifests/{known_digest}"
+        ))
         .header("content-type", "application/vnd.oci.image.manifest.v1+json")
         .body(evil_body.to_vec())
         .send()
@@ -799,10 +793,8 @@ async fn end_to_end_concurrent_pushes_to_active_digest_all_succeed() {
     // Ten parallel PUTs of the same compliant manifest. None should
     // see torn state in cartorio's store; all should be admitted.
     let digest = manifest_digest(TEST_MANIFEST);
-    let cartorio_state = build_cartorio(|_| {
-        vec![admitted_artifact(&digest, ORG, "concurrent-img")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_| vec![admitted_artifact(&digest, ORG, "concurrent-img")]).await;
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state).await;
     let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
@@ -849,10 +841,8 @@ async fn end_to_end_quarantine_then_reactivate_lifecycle() {
     // The same digest, three lifecycle states, gate honors live state
     // throughout.
     let digest = manifest_digest(TEST_MANIFEST);
-    let cartorio_state = build_cartorio(|_| {
-        vec![admitted_artifact(&digest, ORG, "quar-react")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_| vec![admitted_artifact(&digest, ORG, "quar-react")]).await;
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state.clone()).await;
     let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
@@ -914,10 +904,8 @@ async fn end_to_end_lifecycle_admit_then_revoke_changes_gate_outcome() {
     // honor the live status, not a cached one.
     let digest = manifest_digest(TEST_MANIFEST);
 
-    let cartorio_state = build_cartorio(|_store| {
-        vec![admitted_artifact(&digest, ORG, "myimage-lifecycle")]
-    })
-    .await;
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&digest, ORG, "myimage-lifecycle")]).await;
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
     let cartorio_url = spawn_cartorio(cartorio_state.clone()).await;
     let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;

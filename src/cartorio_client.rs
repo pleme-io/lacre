@@ -72,9 +72,10 @@ impl CartorioClient for HttpCartorioClient {
             .map_err(|e| LacreError::CartorioRequest(format!("GET {url}: {e}")))?;
         match resp.status().as_u16() {
             200 => {
-                let snapshot = resp.json::<ArtifactSnapshot>().await.map_err(|e| {
-                    LacreError::CartorioRequest(format!("parse {url}: {e}"))
-                })?;
+                let snapshot = resp
+                    .json::<ArtifactSnapshot>()
+                    .await
+                    .map_err(|e| LacreError::CartorioRequest(format!("parse {url}: {e}")))?;
                 Ok(Some(snapshot))
             }
             404 => Ok(None),

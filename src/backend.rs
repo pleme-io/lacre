@@ -118,7 +118,11 @@ async fn bake_response(resp: reqwest::Response) -> Result<BackendResponse> {
     let headers: Vec<(String, String)> = resp
         .headers()
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
     let body = resp
         .bytes()

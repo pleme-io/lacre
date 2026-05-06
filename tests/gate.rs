@@ -27,7 +27,10 @@ struct FakeCartorio {
 
 impl FakeCartorio {
     fn register(&self, snap: ArtifactSnapshot) {
-        self.by_digest.lock().unwrap().insert(snap.digest.clone(), snap);
+        self.by_digest
+            .lock()
+            .unwrap()
+            .insert(snap.digest.clone(), snap);
     }
 }
 
@@ -52,7 +55,10 @@ impl Backend for FakeBackend {
         _content_type: &str,
         body: Bytes,
     ) -> lacre::Result<BackendResponse> {
-        self.received_puts.lock().unwrap().push((path.to_string(), body.clone()));
+        self.received_puts
+            .lock()
+            .unwrap()
+            .push((path.to_string(), body.clone()));
         let digest = manifest_digest(&body);
         Ok(BackendResponse {
             status: 201,
@@ -77,7 +83,10 @@ impl Backend for FakeBackend {
             .push((method.to_string(), path.to_string()));
         Ok(BackendResponse {
             status: 200,
-            headers: vec![("docker-distribution-api-version".to_string(), "registry/2.0".to_string())],
+            headers: vec![(
+                "docker-distribution-api-version".to_string(),
+                "registry/2.0".to_string(),
+            )],
             body: Bytes::from_static(b"{}"),
         })
     }

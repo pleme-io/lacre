@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use lacre::{Backend, Config, HttpBackend, HttpCartorioClient};
 use lacre::routes::{AppState, router};
+use lacre::{Backend, Config, HttpBackend, HttpCartorioClient};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -28,7 +28,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .json()
         .init();
 

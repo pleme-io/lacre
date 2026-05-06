@@ -9,10 +9,7 @@ use crate::error::Result;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     /// Forward the manifest to the backend.
-    Allow {
-        digest: String,
-        artifact_id: String,
-    },
+    Allow { digest: String, artifact_id: String },
     /// Reject with 403; reason is operator-readable and safe to return
     /// to the client.
     Reject { digest: String, reason: String },

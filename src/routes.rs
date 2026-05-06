@@ -85,8 +85,7 @@ async fn any_handler(
     // Manifest PUT is the only gated path. Match
     //   PUT /v2/<name...>/manifests/<reference>
     // where <name> may contain slashes (e.g. "myorg/myimage").
-    let is_manifest_put =
-        method == Method::PUT && parse_manifest_path(path).is_some();
+    let is_manifest_put = method == Method::PUT && parse_manifest_path(path).is_some();
     if is_manifest_put {
         if body.len() > state.max_manifest_bytes {
             return deny_response(
@@ -139,7 +138,11 @@ async fn passthrough_or_500(
 ) -> Response {
     let header_pairs: Vec<(String, String)> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
     match state
         .backend
@@ -225,10 +228,7 @@ mod tests {
     fn rejects_manifest_with_subpath() {
         // reference cannot contain slashes — that would make it
         // ambiguous with name segments.
-        assert_eq!(
-            parse_manifest_path("/v2/myimage/manifests/v1/extra"),
-            None
-        );
+        assert_eq!(parse_manifest_path("/v2/myimage/manifests/v1/extra"), None);
     }
 
     #[test]
