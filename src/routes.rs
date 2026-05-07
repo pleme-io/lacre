@@ -29,6 +29,7 @@ pub struct AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", any(healthz))
+        .route("/health", any(healthz))
         .route("/{*rest}", any(any_handler))
         .route("/", any(any_handler))
         .with_state(state)
