@@ -19,6 +19,7 @@ pub mod cartorio_client;
 pub mod config;
 pub mod error;
 pub mod gate;
+pub mod metrics;
 pub mod routes;
 
 pub use backend::{Backend, HttpBackend};

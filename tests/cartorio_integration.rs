@@ -82,6 +82,9 @@ fn full_chain() -> AttestationChain {
             result_hash: Blake3Hash::digest(b"compliance-passed"),
             status: ComplianceStatus::Compliant,
         }),
+        sbom: None,
+        slsa_provenance: None,
+        ssdf: None,
     }
 }
 
@@ -419,8 +422,9 @@ async fn build_cartorio(
         org: ORG.into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
-        verifier: cartorio::config::VerifierPolicy::default(),
         auth_bearer_token: None,
+        cors_allowed_origins: Vec::new(),
+        verifier: cartorio::config::VerifierPolicy::default(),
     };
     let app = CartorioAppState::new(cfg);
     // Cartorio v0.5+: app.store is `Arc<dyn Backend + Send + Sync>`.

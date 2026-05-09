@@ -23,6 +23,14 @@ struct Args {
     /// Org this lacre instance gates for.
     #[arg(long, env = "LACRE_ORG")]
     org: String,
+
+    /// Phase G — Prometheus metrics listener address. The
+    /// lareira-lacre PrometheusRule scrapes this endpoint at
+    /// /metrics for lacre_pushes_total /
+    /// lacre_pushes_rejected_total / lacre_cartorio_query_errors_total.
+    /// Set to empty string to disable (e.g. test environments).
+    #[arg(long, env = "LACRE_METRICS_ADDR", default_value = "0.0.0.0:9090")]
+    metrics_addr: String,
 }
 
 #[tokio::main]
@@ -36,6 +44,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
     let cfg = Config::new(args.listen.clone(), args.cartorio_url, args.backend_url);
+
+    // Phase G — install Prometheus exporter BEFORE the gate path
+    // starts taking traffic so no early counter increments are lost.
+    if !args.metrics_addr.is_empty() {
+        match args.metrics_addr.parse() {
+            Ok(addr) => match lacre::metrics::install_exporter(addr) {
+                Ok(()) => tracing::info!(addr = %addr, "prometheus metrics listening"),
+                Err(e) => tracing::error!(error = %e, "metrics exporter install failed (continuing)"),
+            },
+            Err(e) => tracing::error!(error = %e, addr = %args.metrics_addr, "metrics_addr parse failed (continuing)"),
+        }
+    }
 
     let cartorio = HttpCartorioClient::new(cfg.cartorio_url.clone())?;
     let backend: Arc<dyn Backend> = Arc::new(HttpBackend::new(cfg.backend_url.clone())?);

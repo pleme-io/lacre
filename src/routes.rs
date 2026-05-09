@@ -88,7 +88,10 @@ async fn any_handler(
     // where <name> may contain slashes (e.g. "myorg/myimage").
     let is_manifest_put = method == Method::PUT && parse_manifest_path(path).is_some();
     if is_manifest_put {
+        // Phase G — every manifest PUT counts.
+        crate::metrics::inc_pushes_total();
         if body.len() > state.max_manifest_bytes {
+            crate::metrics::inc_pushes_rejected("oversized");
             return deny_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "MANIFEST_INVALID",
@@ -99,6 +102,7 @@ async fn any_handler(
                 ),
             );
         }
+        crate::metrics::inc_cartorio_query();
         match decide(&*state.cartorio, &state.org, &body).await {
             Ok(GateDecision::Allow { .. }) => {
                 let content_type = headers
@@ -106,24 +110,37 @@ async fn any_handler(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/vnd.oci.image.manifest.v1+json");
                 match state.backend.put_manifest(path, content_type, body).await {
-                    Ok(resp) => bake_axum(resp),
-                    Err(e) => deny_response(
-                        StatusCode::BAD_GATEWAY,
-                        "DENIED",
-                        format!("backend error: {e}"),
-                    ),
+                    Ok(resp) => {
+                        crate::metrics::inc_pushes_forwarded();
+                        bake_axum(resp)
+                    },
+                    Err(e) => {
+                        crate::metrics::inc_pushes_rejected("backend_error");
+                        deny_response(
+                            StatusCode::BAD_GATEWAY,
+                            "DENIED",
+                            format!("backend error: {e}"),
+                        )
+                    },
                 }
             }
-            Ok(GateDecision::Reject { digest, reason }) => deny_response(
-                StatusCode::FORBIDDEN,
-                "DENIED",
-                format!("cartorio rejects digest {digest}: {reason}"),
-            ),
-            Err(e) => deny_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "DENIED",
-                format!("cartorio unavailable: {e}"),
-            ),
+            Ok(GateDecision::Reject { digest, reason }) => {
+                crate::metrics::inc_pushes_rejected("cartorio_reject");
+                deny_response(
+                    StatusCode::FORBIDDEN,
+                    "DENIED",
+                    format!("cartorio rejects digest {digest}: {reason}"),
+                )
+            },
+            Err(e) => {
+                crate::metrics::inc_pushes_rejected("cartorio_unreachable");
+                crate::metrics::inc_cartorio_query_error("unreachable");
+                deny_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "DENIED",
+                    format!("cartorio unavailable: {e}"),
+                )
+            },
         }
     } else {
         passthrough_or_500(&state, &method, &path_and_query, &headers, body).await
