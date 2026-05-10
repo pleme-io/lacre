@@ -21,6 +21,7 @@ pub mod error;
 pub mod gate;
 pub mod metrics;
 pub mod routes;
+pub mod testing;
 
 pub use backend::{Backend, HttpBackend};
 pub use cartorio_client::{ArtifactSnapshot, CartorioClient, CartorioStatus, HttpCartorioClient};

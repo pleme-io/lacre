@@ -27,11 +27,11 @@
 //! handshake) so it can place a digest in any status without needing
 //! to compute valid signatures.
 
+use lacre::testing::{spawn_lacre, spawn_mock_backend};
 use cartorio::testing::admitted_artifact;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Router, extract::Request, response::Response, routing::any};
 use cartorio::{
     api::router as cartorio_router,
     config::RegistryConfig,
@@ -46,12 +46,7 @@ use cartorio::{
     },
     state::AppState as CartorioAppState,
 };
-use lacre::{
-    Backend, HttpBackend, HttpCartorioClient,
-    routes::{AppState as LacreAppState, router as lacre_router},
-};
 use sha2::{Digest, Sha256};
-use std::sync::Mutex;
 
 const ORG: &str = "pleme-io";
 
@@ -239,45 +234,7 @@ fn manifest_digest(body: &[u8]) -> String {
 
 // ─── helpers: spawn three real services on random ports ────────────
 
-#[derive(Default)]
-struct MockBackend {
-    received: Mutex<Vec<(String, String, Vec<u8>)>>, // (method, path, body)
-}
 
-async fn spawn_mock_backend() -> (String, Arc<MockBackend>) {
-    let backend = Arc::new(MockBackend::default());
-    let backend_clone = backend.clone();
-    let app: Router = Router::new().route(
-        "/{*rest}",
-        any(move |req: Request| {
-            let backend = backend_clone.clone();
-            async move {
-                let method = req.method().as_str().to_string();
-                let path = req.uri().path().to_string();
-                let body = axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024)
-                    .await
-                    .unwrap_or_default();
-                backend
-                    .received
-                    .lock()
-                    .unwrap()
-                    .push((method, path, body.to_vec()));
-                Response::builder()
-                    .status(201)
-                    .header("docker-content-digest", "sha256:fake")
-                    .body(axum::body::Body::from("mock-backend-ok"))
-                    .unwrap()
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (url, backend)
-}
 
 async fn spawn_cartorio(state: Arc<CartorioAppState>) -> String {
     let app = cartorio_router(state);
@@ -290,24 +247,6 @@ async fn spawn_cartorio(state: Arc<CartorioAppState>) -> String {
     url
 }
 
-async fn spawn_lacre(cartorio_url: String, backend_url: String, org: &str) -> String {
-    let cartorio_client = HttpCartorioClient::new(cartorio_url).unwrap();
-    let backend: Arc<dyn Backend> = Arc::new(HttpBackend::new(backend_url).unwrap());
-    let state = Arc::new(LacreAppState {
-        cartorio: Arc::new(cartorio_client),
-        backend,
-        org: org.into(),
-        max_manifest_bytes: 4 * 1024 * 1024,
-    });
-    let app = lacre_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    url
-}
 
 async fn build_cartorio(
     seed: impl FnOnce(&cartorio::store::Store) -> Vec<(ArtifactState, LedgerEvent)>,
