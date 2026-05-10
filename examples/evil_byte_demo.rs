@@ -1,0 +1,354 @@
+//! **Phase F demo capture — lacre evil-byte 403.**
+//!
+//! Spins up a real cartorio process (in-memory), a real lacre process,
+//! and a mock OCI backend, all on random ports. Pushes a legit
+//! manifest (admitted in cartorio), then pushes EVIL bytes claiming the
+//! same digest in the URL reference. Lacre hashes the actual body,
+//! sees the body's digest is not Active in cartorio, and 403s.
+//!
+//! Run via:
+//!     cargo run --release --example evil_byte_demo > docs/evil-byte-demo.txt
+//!
+//! Output is the canonical operator-facing transcript: every URL,
+//! every status code, every response body. Reproducible because the
+//! mock backend is deterministic and the seed is hardcoded.
+
+use std::sync::{Arc, Mutex};
+
+use axum::{Router, extract::Request, response::Response, routing::any};
+use cartorio::{
+    api::router as cartorio_router,
+    config::RegistryConfig,
+    core::types::{
+        AdmissionEvent, ArtifactKind, ArtifactState, ArtifactStatus, AttestationChain,
+        BuildAttestation, ComplianceAttestation, ComplianceStatus, ImageAttestation, LedgerEvent,
+        ModifierIdentity, SignedRoot, SigningAlgorithm, SourceAttestation,
+    },
+    merkle::{compose_admission_event_root, compose_state_leaf_root},
+    state::AppState as CartorioAppState,
+};
+use lacre::{
+    Backend, HttpBackend, HttpCartorioClient,
+    routes::{AppState as LacreAppState, router as lacre_router},
+};
+use sha2::{Digest, Sha256};
+use tameshi::hash::Blake3Hash;
+
+const ORG: &str = "pleme-io";
+
+fn manifest_digest(body: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(body);
+    format!("sha256:{}", hex::encode(h.finalize()))
+}
+
+fn full_chain() -> AttestationChain {
+    AttestationChain {
+        source: Some(SourceAttestation {
+            git_commit: "abc123".into(),
+            tree_hash: Blake3Hash::digest(b"tree"),
+            flake_lock_hash: Blake3Hash::digest(b"lock"),
+        }),
+        build: Some(BuildAttestation {
+            closure_hash: Blake3Hash::digest(b"closure"),
+            sbom_hash: Blake3Hash::digest(b"sbom"),
+            slsa_level: 3,
+        }),
+        image: Some(ImageAttestation {
+            oci_digest: "sha256:beef".into(),
+            cosign_signature_ref: "ref:sig".into(),
+            slsa_provenance_ref: "ref:prov".into(),
+        }),
+        compliance: Some(ComplianceAttestation {
+            framework: "NIST_800_53".into(),
+            baseline: "high".into(),
+            profile: "nist-800-53-high".into(),
+            result_hash: Blake3Hash::digest(b"compliance-passed"),
+            status: ComplianceStatus::Compliant,
+        }),
+        sbom: None,
+        slsa_provenance: None,
+        ssdf: None,
+        vex: None,
+    }
+}
+
+fn admitted_artifact(digest: &str, org: &str, name: &str) -> (ArtifactState, LedgerEvent) {
+    let chain = full_chain();
+    let modifier = ModifierIdentity::Publisher {
+        publisher_id: "alice@pleme.io".into(),
+    };
+    let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let id = format!("art-{name}");
+    let state_root = compose_state_leaf_root(
+        ArtifactKind::OciImage.name(),
+        name,
+        "1.0.0",
+        "alice@pleme.io",
+        org,
+        digest,
+        &chain,
+        ArtifactStatus::Active,
+        &modifier,
+        now.timestamp(),
+    );
+    let event_root = compose_admission_event_root(
+        &id,
+        ArtifactKind::OciImage.name(),
+        name,
+        "1.0.0",
+        "alice@pleme.io",
+        org,
+        digest,
+        &chain,
+        now.timestamp(),
+    );
+    let signed = SignedRoot {
+        root: state_root.clone(),
+        signature: "a".repeat(64),
+        algorithm: SigningAlgorithm::Blake3KeyedHmac,
+        signer_id: "publisher:alice@pleme.io".into(),
+        signed_at: now,
+        cert_chain: None,
+        rekor_bundle: None,
+    };
+    let signed_for_evt = signed.clone();
+    (
+        ArtifactState {
+            id: id.clone(),
+            kind: ArtifactKind::OciImage,
+            name: name.into(),
+            version: "1.0.0".into(),
+            publisher_id: "alice@pleme.io".into(),
+            org: org.into(),
+            digest: digest.into(),
+            attestation: chain.clone(),
+            status: ArtifactStatus::Active,
+            last_modified_at: now,
+            last_modifier: modifier,
+            composed_root: state_root,
+            signed_root: signed,
+            admitted_at: now,
+        },
+        LedgerEvent::Admission(AdmissionEvent {
+            event_id: format!("evt-admit-{name}"),
+            artifact_id: id,
+            kind: ArtifactKind::OciImage,
+            name: name.into(),
+            version: "1.0.0".into(),
+            publisher_id: "alice@pleme.io".into(),
+            org: org.into(),
+            digest: digest.into(),
+            attestation: chain,
+            composed_root: event_root,
+            signed_root: signed_for_evt,
+            created_at: now,
+        }),
+    )
+}
+
+#[derive(Default)]
+struct MockBackend {
+    received: Mutex<Vec<(String, String, Vec<u8>)>>,
+}
+
+async fn spawn_mock_backend() -> (String, Arc<MockBackend>) {
+    let backend = Arc::new(MockBackend::default());
+    let backend_clone = backend.clone();
+    let app: Router = Router::new().route(
+        "/{*rest}",
+        any(move |req: Request| {
+            let backend = backend_clone.clone();
+            async move {
+                let method = req.method().as_str().to_string();
+                let path = req.uri().path().to_string();
+                let body = axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .unwrap_or_default();
+                backend
+                    .received
+                    .lock()
+                    .unwrap()
+                    .push((method, path, body.to_vec()));
+                Response::builder()
+                    .status(201)
+                    .header("docker-content-digest", "sha256:fake")
+                    .body(axum::body::Body::from("mock-backend-ok"))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, backend)
+}
+
+async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
+    let cfg = RegistryConfig {
+        org: ORG.into(),
+        listen: "127.0.0.1:0".into(),
+        pki_url: None,
+        auth_bearer_token: None,
+        cors_allowed_origins: Vec::new(),
+        verifier: cartorio::config::VerifierPolicy::default(),
+    };
+    let state = CartorioAppState::new(cfg);
+    let app = cartorio_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, state)
+}
+
+async fn spawn_lacre(cartorio_url: String, backend_url: String, org: &str) -> String {
+    let cartorio_client = HttpCartorioClient::new(cartorio_url).unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(HttpBackend::new(backend_url).unwrap());
+    let state = Arc::new(LacreAppState {
+        cartorio: Arc::new(cartorio_client),
+        backend,
+        org: org.into(),
+        max_manifest_bytes: 4 * 1024 * 1024,
+    });
+    let app = lacre_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() {
+    println!("# lacre evil-byte 403 — captured demonstration");
+    println!();
+    println!("Stack: real cartorio + real lacre + mock OCI backend, all over real TCP.");
+    println!("Adversary: pushes EVIL bytes but URL-claims a known-good digest.");
+    println!("Expected: lacre hashes the body (not the URL), sees the body");
+    println!("          digest is not Active in cartorio, returns 403.");
+    println!();
+
+    // ── Setup ──────────────────────────────────────────────────────
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let (cartorio_url, _cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url.clone(), ORG).await;
+
+    let known_body: &[u8] = b"the-known-good-manifest-body";
+    let known_digest = manifest_digest(known_body);
+    let evil_body: &[u8] = b"some-malicious-bytes-with-different-hash-entirely";
+    let evil_digest = manifest_digest(evil_body);
+
+    // Seed cartorio directly with the known-good admission — would
+    // normally come from tabeliao publish through the admit endpoint.
+    let (state, evt) = admitted_artifact(&known_digest, ORG, "good-image");
+    _cartorio_state.store.admit(state, evt).await;
+
+    println!("─── topology ───────────────────────────────────────────────");
+    println!("cartorio (in-memory):  {cartorio_url}");
+    println!("lacre  (real router):  {lacre_url}");
+    println!("backend (mock OCI-2):  {backend_url}");
+    println!();
+    println!("─── seeded admission ───────────────────────────────────────");
+    println!("known-good manifest body sha256: {known_digest}");
+    println!("                             (admitted in cartorio, status=Active)");
+    println!("evil          manifest body sha256: {evil_digest}");
+    println!("                             (NOT admitted; should be rejected)");
+    println!();
+
+    let client = reqwest::Client::new();
+
+    // ── Attempt 1: legit push of the known-good body to its real digest URL.
+    println!("─── transaction 1 — legit push ──────────────────────────────");
+    let url1 = format!("{lacre_url}/v2/myorg/myimage/manifests/{known_digest}");
+    println!(
+        "PUT {url1}\nContent-Type: application/vnd.oci.image.manifest.v1+json\n(body: {} bytes — sha256 matches URL ref)",
+        known_body.len()
+    );
+    let r1 = client
+        .put(&url1)
+        .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .body(known_body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    println!("→ HTTP {}", r1.status().as_u16());
+    let body1 = r1.text().await.unwrap();
+    println!("→ response body: {body1}");
+    println!();
+
+    // ── Attempt 2: ADVERSARIAL — evil body, but URL claims the known digest.
+    println!("─── transaction 2 — adversarial spoof ──────────────────────");
+    let url2 = format!("{lacre_url}/v2/myorg/myimage/manifests/{known_digest}");
+    println!(
+        "PUT {url2}    ← URL still claims known-good digest\nContent-Type: application/vnd.oci.image.manifest.v1+json\n(body: {} bytes — but actual sha256 = {})",
+        evil_body.len(),
+        evil_digest
+    );
+    let r2 = client
+        .put(&url2)
+        .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .body(evil_body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let status = r2.status().as_u16();
+    let body2 = r2.text().await.unwrap();
+    println!("→ HTTP {status}");
+    println!("→ response body:");
+    for line in body2.lines() {
+        println!("  {line}");
+    }
+    println!();
+
+    // ── Verify backend never saw the evil bytes ────────────────────
+    println!("─── backend evidence ────────────────────────────────────────");
+    let recv = backend_recorder.received.lock().unwrap();
+    let manifest_puts: Vec<_> = recv
+        .iter()
+        .filter(|(m, p, _)| m == "PUT" && p.contains("/manifests/"))
+        .collect();
+    println!(
+        "backend received {} total PUT requests; {} were /manifests/ PUTs.",
+        recv.iter().filter(|(m, _, _)| m == "PUT").count(),
+        manifest_puts.len()
+    );
+    for (m, p, body) in manifest_puts.iter() {
+        let body_digest = manifest_digest(body);
+        println!("  {m} {p}");
+        println!("    body sha256: {body_digest}");
+        println!(
+            "    body digest matches known-good: {}",
+            body_digest == known_digest
+        );
+    }
+    println!();
+
+    // ── Assertions ─────────────────────────────────────────────────
+    let evil_reached_backend = manifest_puts
+        .iter()
+        .any(|(_, _, body)| body.as_slice() == evil_body);
+    assert_eq!(
+        status, 403,
+        "evil-byte attempt MUST 403 (got {status})"
+    );
+    assert!(
+        !evil_reached_backend,
+        "evil bytes MUST NOT reach backend (would be a wire-level bypass)"
+    );
+
+    println!("─── proof summary ───────────────────────────────────────────");
+    println!("✓ Adversarial PUT returned HTTP 403 Forbidden.");
+    println!("✓ Evil bytes did NOT reach the backend OCI registry.");
+    println!("✓ Lacre hashes body bytes; URL reference is informational only.");
+    println!("✓ Tamper guarantee: the URL reference cannot subvert the gate.");
+    println!();
+    println!("Plan goal #4 — closed.");
+}

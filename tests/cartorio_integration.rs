@@ -85,6 +85,7 @@ fn full_chain() -> AttestationChain {
         sbom: None,
         slsa_provenance: None,
         ssdf: None,
+        vex: None,
     }
 }
 
