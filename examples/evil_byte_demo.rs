@@ -16,23 +16,12 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{Router, extract::Request, response::Response, routing::any};
-use cartorio::{
-    api::router as cartorio_router,
-    config::RegistryConfig,
-    core::types::{
-        AdmissionEvent, ArtifactKind, ArtifactState, ArtifactStatus, AttestationChain,
-        BuildAttestation, ComplianceAttestation, ComplianceStatus, ImageAttestation, LedgerEvent,
-        ModifierIdentity, SignedRoot, SigningAlgorithm, SourceAttestation,
-    },
-    merkle::{compose_admission_event_root, compose_state_leaf_root},
-    state::AppState as CartorioAppState,
-};
+use cartorio::testing::{admitted_artifact, spawn_cartorio_server};
 use lacre::{
     Backend, HttpBackend, HttpCartorioClient,
     routes::{AppState as LacreAppState, router as lacre_router},
 };
 use sha2::{Digest, Sha256};
-use tameshi::hash::Blake3Hash;
 
 const ORG: &str = "pleme-io";
 
@@ -42,110 +31,7 @@ fn manifest_digest(body: &[u8]) -> String {
     format!("sha256:{}", hex::encode(h.finalize()))
 }
 
-fn full_chain() -> AttestationChain {
-    AttestationChain {
-        source: Some(SourceAttestation {
-            git_commit: "abc123".into(),
-            tree_hash: Blake3Hash::digest(b"tree"),
-            flake_lock_hash: Blake3Hash::digest(b"lock"),
-        }),
-        build: Some(BuildAttestation {
-            closure_hash: Blake3Hash::digest(b"closure"),
-            sbom_hash: Blake3Hash::digest(b"sbom"),
-            slsa_level: 3,
-        }),
-        image: Some(ImageAttestation {
-            oci_digest: "sha256:beef".into(),
-            cosign_signature_ref: "ref:sig".into(),
-            slsa_provenance_ref: "ref:prov".into(),
-        }),
-        compliance: Some(ComplianceAttestation {
-            framework: "NIST_800_53".into(),
-            baseline: "high".into(),
-            profile: "nist-800-53-high".into(),
-            result_hash: Blake3Hash::digest(b"compliance-passed"),
-            status: ComplianceStatus::Compliant,
-        }),
-        sbom: None,
-        slsa_provenance: None,
-        ssdf: None,
-        vex: None,
-    }
-}
 
-fn admitted_artifact(digest: &str, org: &str, name: &str) -> (ArtifactState, LedgerEvent) {
-    let chain = full_chain();
-    let modifier = ModifierIdentity::Publisher {
-        publisher_id: "alice@pleme.io".into(),
-    };
-    let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-    let id = format!("art-{name}");
-    let state_root = compose_state_leaf_root(
-        ArtifactKind::OciImage.name(),
-        name,
-        "1.0.0",
-        "alice@pleme.io",
-        org,
-        digest,
-        &chain,
-        ArtifactStatus::Active,
-        &modifier,
-        now.timestamp(),
-    );
-    let event_root = compose_admission_event_root(
-        &id,
-        ArtifactKind::OciImage.name(),
-        name,
-        "1.0.0",
-        "alice@pleme.io",
-        org,
-        digest,
-        &chain,
-        now.timestamp(),
-    );
-    let signed = SignedRoot {
-        root: state_root.clone(),
-        signature: "a".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: "publisher:alice@pleme.io".into(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    let signed_for_evt = signed.clone();
-    (
-        ArtifactState {
-            id: id.clone(),
-            kind: ArtifactKind::OciImage,
-            name: name.into(),
-            version: "1.0.0".into(),
-            publisher_id: "alice@pleme.io".into(),
-            org: org.into(),
-            digest: digest.into(),
-            attestation: chain.clone(),
-            status: ArtifactStatus::Active,
-            last_modified_at: now,
-            last_modifier: modifier,
-            composed_root: state_root,
-            signed_root: signed,
-            admitted_at: now,
-        },
-        LedgerEvent::Admission(AdmissionEvent {
-            event_id: format!("evt-admit-{name}"),
-            artifact_id: id,
-            kind: ArtifactKind::OciImage,
-            name: name.into(),
-            version: "1.0.0".into(),
-            publisher_id: "alice@pleme.io".into(),
-            org: org.into(),
-            digest: digest.into(),
-            attestation: chain,
-            composed_root: event_root,
-            signed_root: signed_for_evt,
-            created_at: now,
-        }),
-    )
-}
 
 #[derive(Default)]
 struct MockBackend {
@@ -187,26 +73,6 @@ async fn spawn_mock_backend() -> (String, Arc<MockBackend>) {
     (url, backend)
 }
 
-async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
-    let cfg = RegistryConfig {
-        org: ORG.into(),
-        listen: "127.0.0.1:0".into(),
-        pki_url: None,
-        auth_bearer_token: None,
-        cors_allowed_origins: Vec::new(),
-        verifier: cartorio::config::VerifierPolicy::default(),
-    };
-    let state = CartorioAppState::new(cfg);
-    let app = cartorio_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (url, state)
-}
-
 async fn spawn_lacre(cartorio_url: String, backend_url: String, org: &str) -> String {
     let cartorio_client = HttpCartorioClient::new(cartorio_url).unwrap();
     let backend: Arc<dyn Backend> = Arc::new(HttpBackend::new(backend_url).unwrap());
@@ -238,7 +104,7 @@ async fn main() {
 
     // ── Setup ──────────────────────────────────────────────────────
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
-    let (cartorio_url, _cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, _cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url.clone(), ORG).await;
 
     let known_body: &[u8] = b"the-known-good-manifest-body";

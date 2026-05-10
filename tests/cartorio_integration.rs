@@ -27,6 +27,7 @@
 //! handshake) so it can place a digest in any status without needing
 //! to compute valid signatures.
 
+use cartorio::testing::admitted_artifact;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,13 +36,12 @@ use cartorio::{
     api::router as cartorio_router,
     config::RegistryConfig,
     core::types::{
-        AdmissionEvent, ArtifactKind, ArtifactState, ArtifactStatus, AttestationChain,
-        BuildAttestation, ComplianceAttestation, ComplianceStatus, ImageAttestation, LedgerEvent,
+        ArtifactState, ArtifactStatus, LedgerEvent,
         ModifierIdentity, QuarantineEvent, ReactivationEvent, RevocationEvent, SignedRoot,
-        SigningAlgorithm, SourceAttestation,
+        SigningAlgorithm,
     },
     merkle::{
-        compose_admission_event_root, compose_quarantine_event_root,
+        compose_quarantine_event_root,
         compose_reactivation_event_root, compose_revocation_event_root, compose_state_leaf_root,
     },
     state::AppState as CartorioAppState,
@@ -52,122 +52,15 @@ use lacre::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
-use tameshi::hash::Blake3Hash;
 
 const ORG: &str = "pleme-io";
 
 // ─── helpers: cartorio fixtures ─────────────────────────────────────
 
-fn full_chain() -> AttestationChain {
-    AttestationChain {
-        source: Some(SourceAttestation {
-            git_commit: "abc123".into(),
-            tree_hash: Blake3Hash::digest(b"tree"),
-            flake_lock_hash: Blake3Hash::digest(b"lock"),
-        }),
-        build: Some(BuildAttestation {
-            closure_hash: Blake3Hash::digest(b"closure"),
-            sbom_hash: Blake3Hash::digest(b"sbom"),
-            slsa_level: 3,
-        }),
-        image: Some(ImageAttestation {
-            oci_digest: "sha256:beef".into(),
-            cosign_signature_ref: "ref:sig".into(),
-            slsa_provenance_ref: "ref:prov".into(),
-        }),
-        compliance: Some(ComplianceAttestation {
-            framework: "NIST_800_53".into(),
-            baseline: "high".into(),
-            profile: "nist-800-53-high".into(),
-            result_hash: Blake3Hash::digest(b"compliance-passed"),
-            status: ComplianceStatus::Compliant,
-        }),
-        sbom: None,
-        slsa_provenance: None,
-        ssdf: None,
-        vex: None,
-    }
-}
 
 /// Construct a fully-admitted `ArtifactState` + `LedgerEvent` pair for a
 /// given content digest. The `signed_root.signature` is a placeholder
 /// (cartorio's `verify_signed_root_shape` only checks length/non-empty).
-fn admitted_artifact(digest: &str, org: &str, name: &str) -> (ArtifactState, LedgerEvent) {
-    let chain = full_chain();
-    let modifier = ModifierIdentity::Publisher {
-        publisher_id: "alice@pleme.io".into(),
-    };
-    let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-    let id = format!("art-{name}");
-
-    let state_root = compose_state_leaf_root(
-        ArtifactKind::OciImage.name(),
-        name,
-        "1.0.0",
-        "alice@pleme.io",
-        org,
-        digest,
-        &chain,
-        ArtifactStatus::Active,
-        &modifier,
-        now.timestamp(),
-    );
-    let event_root = compose_admission_event_root(
-        &id,
-        ArtifactKind::OciImage.name(),
-        name,
-        "1.0.0",
-        "alice@pleme.io",
-        org,
-        digest,
-        &chain,
-        now.timestamp(),
-    );
-    let signed = SignedRoot {
-        root: state_root.clone(),
-        signature: "a".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: "publisher:alice@pleme.io".into(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    (
-        ArtifactState {
-            id: id.clone(),
-            kind: ArtifactKind::OciImage,
-            name: name.into(),
-            version: "1.0.0".into(),
-            publisher_id: "alice@pleme.io".into(),
-            org: org.into(),
-            digest: digest.into(),
-            attestation: chain.clone(),
-            status: ArtifactStatus::Active,
-            last_modified_at: now,
-            last_modifier: modifier,
-            composed_root: state_root.clone(),
-            signed_root: signed.clone(),
-            admitted_at: now,
-        },
-        LedgerEvent::Admission(AdmissionEvent {
-            event_id: format!("evt-admit-{name}"),
-            artifact_id: id,
-            kind: ArtifactKind::OciImage,
-            name: name.into(),
-            version: "1.0.0".into(),
-            publisher_id: "alice@pleme.io".into(),
-            org: org.into(),
-            digest: digest.into(),
-            attestation: chain,
-            composed_root: event_root.clone(),
-            signed_root: SignedRoot {
-                root: event_root,
-                ..signed
-            },
-            created_at: now,
-        }),
-    )
-}
 
 fn revocation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
     let modifier = ModifierIdentity::Pki {
