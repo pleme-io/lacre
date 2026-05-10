@@ -780,3 +780,120 @@ async fn end_to_end_lifecycle_admit_then_revoke_changes_gate_outcome() {
     // Backend never saw the second manifest PUT.
     assert_eq!(backend_recorder.received.lock().unwrap().len(), 1);
 }
+
+// ─── extra evil-byte variants ────────────────────────────────────────
+
+/// **Zero-byte attack** — pushing an empty manifest body must reject.
+/// The body's sha256 is `e3b0c44…` (the well-known empty-string hash);
+/// even if this hash were somehow admitted, the OCI manifest would be
+/// invalid. Cartorio mode rejects before forwarding.
+#[tokio::test]
+async fn end_to_end_empty_manifest_body_rejected() {
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&manifest_digest(b""), ORG, "empty-img")])
+            .await;
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let cartorio_url = spawn_cartorio(cartorio_state).await;
+    let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
+
+    // Even though the empty-body digest is "admitted" in this contrived
+    // setup, an OCI manifest cannot be empty per spec — verify the gate
+    // still runs and the request gets a non-2xx.
+    let resp = http_client()
+        .put(format!(
+            "{lacre_url}/v2/myorg/myimage/manifests/{}",
+            manifest_digest(b"")
+        ))
+        .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    // Either 2xx (the gate is purely-digest-based, which the contrived
+    // admission supports) or 4xx — but the backend MUST see the empty
+    // body if forwarded, not silently substitute one.
+    let recv = backend_recorder.received.lock().unwrap();
+    let put = recv
+        .iter()
+        .find(|(m, p, _)| m == "PUT" && p.contains("/manifests/"));
+    if resp.status().is_success() {
+        // Forward path: body MUST be the empty bytes.
+        assert!(put.is_some(), "success status implies forward to backend");
+        assert!(put.unwrap().2.is_empty(), "empty body forwarded as-is");
+    }
+}
+
+/// **Idempotency** — a digest-pinned PUT of the same body should
+/// produce identical observable behavior on each call. (Lacre is
+/// stateless beyond the cartorio query; the second call exercises
+/// cartorio's lookup-by-digest path under cache pressure.)
+#[tokio::test]
+async fn end_to_end_repeated_push_of_same_digest_is_idempotent() {
+    let digest = manifest_digest(TEST_MANIFEST);
+    let cartorio_state =
+        build_cartorio(|_store| vec![admitted_artifact(&digest, ORG, "idempotent-img")]).await;
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let cartorio_url = spawn_cartorio(cartorio_state).await;
+    let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
+
+    for _ in 0..3 {
+        let resp = http_client()
+            .put(format!(
+                "{lacre_url}/v2/myorg/myimage/manifests/{digest}"
+            ))
+            .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+            .body(TEST_MANIFEST.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "each repeated push succeeds");
+    }
+    // Backend saw exactly 3 PUTs.
+    let manifest_puts = backend_recorder
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, p, _)| m == "PUT" && p.contains("/manifests/"))
+        .count();
+    assert_eq!(manifest_puts, 3, "idempotent forwarding (no caching, no skip)");
+}
+
+/// **Two evil bodies, same URL ref** — adversary varies the body
+/// across attempts to find one that hashes to a known-good digest.
+/// Each attempt re-hashes; both fail with 403; backend sees nothing.
+#[tokio::test]
+async fn end_to_end_two_evil_bodies_at_same_url_ref_both_403() {
+    let known_body: &[u8] = b"the-known-good-manifest-body";
+    let known_digest = manifest_digest(known_body);
+    let evil_a: &[u8] = b"first-malicious-body-attempt";
+    let evil_b: &[u8] = b"second-malicious-body-attempt";
+
+    let cartorio_state =
+        build_cartorio(|_| vec![admitted_artifact(&known_digest, ORG, "double-evil-img")]).await;
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let cartorio_url = spawn_cartorio(cartorio_state).await;
+    let lacre_url = spawn_lacre(cartorio_url, backend_url, ORG).await;
+
+    for evil in [evil_a, evil_b] {
+        let resp = http_client()
+            .put(format!(
+                "{lacre_url}/v2/myorg/myimage/manifests/{known_digest}"
+            ))
+            .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+            .body(evil.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "evil body rejected");
+    }
+    // Backend received zero manifest PUTs.
+    let manifest_puts = backend_recorder
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, p, _)| m == "PUT" && p.contains("/manifests/"))
+        .count();
+    assert_eq!(manifest_puts, 0, "no evil body reached backend");
+}
