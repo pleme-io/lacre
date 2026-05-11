@@ -28,7 +28,7 @@
 //! to compute valid signatures.
 
 use lacre::testing::{spawn_lacre, spawn_mock_backend};
-use cartorio::testing::admitted_artifact;
+use cartorio::testing::{admitted_artifact, quarantine_for, reactivation_for, revocation_for};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,13 +36,7 @@ use cartorio::{
     api::router as cartorio_router,
     config::RegistryConfig,
     core::types::{
-        ArtifactState, ArtifactStatus, LedgerEvent,
-        ModifierIdentity, QuarantineEvent, ReactivationEvent, RevocationEvent, SignedRoot,
-        SigningAlgorithm,
-    },
-    merkle::{
-        compose_quarantine_event_root,
-        compose_reactivation_event_root, compose_revocation_event_root, compose_state_leaf_root,
+        ArtifactState, LedgerEvent,
     },
     state::AppState as CartorioAppState,
 };
@@ -57,174 +51,8 @@ const ORG: &str = "pleme-io";
 /// given content digest. The `signed_root.signature` is a placeholder
 /// (cartorio's `verify_signed_root_shape` only checks length/non-empty).
 
-fn revocation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
-    let modifier = ModifierIdentity::Pki {
-        signer_id: "pleme-io".into(),
-    };
-    let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-    let new_state_root = compose_state_leaf_root(
-        state.kind.name(),
-        &state.name,
-        &state.version,
-        &state.publisher_id,
-        &state.org,
-        &state.digest,
-        &state.attestation,
-        ArtifactStatus::Revoked,
-        &modifier,
-        now.timestamp(),
-    );
-    let event_root =
-        compose_revocation_event_root(&state.id, "test-revoke", &modifier, now.timestamp());
-    let signed = SignedRoot {
-        root: new_state_root.clone(),
-        signature: "b".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: modifier.signer_label(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    (
-        ArtifactState {
-            status: ArtifactStatus::Revoked,
-            last_modified_at: now,
-            last_modifier: modifier.clone(),
-            composed_root: new_state_root,
-            signed_root: signed.clone(),
-            ..state.clone()
-        },
-        LedgerEvent::Revocation(RevocationEvent {
-            event_id: format!("evt-rev-{}", state.id),
-            artifact_id: state.id.clone(),
-            reason: "test-revoke".into(),
-            modifier: modifier.clone(),
-            composed_root: event_root.clone(),
-            signed_root: SignedRoot {
-                root: event_root,
-                ..signed
-            },
-            created_at: now,
-        }),
-    )
-}
 
-fn quarantine_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
-    let modifier = ModifierIdentity::Scanner {
-        signer_id: "openclaw-scanner".into(),
-    };
-    let now = chrono::DateTime::from_timestamp(1_750_000_000, 0).unwrap();
-    let new_state_root = compose_state_leaf_root(
-        state.kind.name(),
-        &state.name,
-        &state.version,
-        &state.publisher_id,
-        &state.org,
-        &state.digest,
-        &state.attestation,
-        ArtifactStatus::Quarantined,
-        &modifier,
-        now.timestamp(),
-    );
-    let event_root =
-        compose_quarantine_event_root(&state.id, "test-quarantine", &modifier, now.timestamp());
-    let signed = SignedRoot {
-        root: new_state_root.clone(),
-        signature: "c".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: modifier.signer_label(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    (
-        ArtifactState {
-            status: ArtifactStatus::Quarantined,
-            last_modified_at: now,
-            last_modifier: modifier.clone(),
-            composed_root: new_state_root,
-            signed_root: signed.clone(),
-            ..state.clone()
-        },
-        LedgerEvent::Quarantine(QuarantineEvent {
-            event_id: format!("evt-q-{}", state.id),
-            artifact_id: state.id.clone(),
-            reason: "test-quarantine".into(),
-            modifier,
-            composed_root: event_root.clone(),
-            signed_root: SignedRoot {
-                root: event_root,
-                ..signed
-            },
-            created_at: now,
-        }),
-    )
-}
 
-fn reactivation_for(state: &ArtifactState) -> (ArtifactState, LedgerEvent) {
-    let modifier = ModifierIdentity::Operator {
-        signer_id: "ops-on-call".into(),
-    };
-    let now = chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap();
-    let cosignature = SignedRoot {
-        root: state.composed_root.clone(),
-        signature: "d".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: "scanner:openclaw-scanner".into(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    let new_state_root = compose_state_leaf_root(
-        state.kind.name(),
-        &state.name,
-        &state.version,
-        &state.publisher_id,
-        &state.org,
-        &state.digest,
-        &state.attestation,
-        ArtifactStatus::Active,
-        &modifier,
-        now.timestamp(),
-    );
-    let event_root = compose_reactivation_event_root(
-        &state.id,
-        &modifier,
-        &cosignature.signer_id,
-        now.timestamp(),
-    );
-    let signed = SignedRoot {
-        root: new_state_root.clone(),
-        signature: "e".repeat(64),
-        algorithm: SigningAlgorithm::Blake3KeyedHmac,
-        signer_id: modifier.signer_label(),
-        signed_at: now,
-        cert_chain: None,
-        rekor_bundle: None,
-    };
-    (
-        ArtifactState {
-            status: ArtifactStatus::Active,
-            last_modified_at: now,
-            last_modifier: modifier.clone(),
-            composed_root: new_state_root,
-            signed_root: signed.clone(),
-            ..state.clone()
-        },
-        LedgerEvent::Reactivation(ReactivationEvent {
-            event_id: format!("evt-react-{}", state.id),
-            artifact_id: state.id.clone(),
-            modifier,
-            cosignature,
-            composed_root: event_root.clone(),
-            signed_root: SignedRoot {
-                root: event_root,
-                ..signed
-            },
-            created_at: now,
-        }),
-    )
-}
 
 fn manifest_digest(body: &[u8]) -> String {
     let mut h = Sha256::new();
